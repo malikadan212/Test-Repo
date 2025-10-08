@@ -226,29 +226,38 @@ jobs:
             echo "No CodeQL results directory found"
           fi
           
-          # Create basic vulnerability report
-          cat > "$VULN_REPORT" << 'EOF'
-{
-  "metadata": {
-    "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-    "scan_type": "$TOOL",
-    "total_files_scanned": $(echo "${{ steps.changed-files.outputs.files }}" | wc -w)
-  },
-  "summary": {
-    "total_vulnerabilities": $TOTAL_VULNS,
-    "severity_breakdown": {
-      "critical": $CRITICAL_VULNS,
-      "high": $HIGH_VULNS,
-      "medium": $MEDIUM_VULNS,
-      "low": $LOW_VULNS
-    },
-    "tool_breakdown": {
-      "cppcheck": $CPPCHECK_COUNT,
-      "codeql": $CODEQL_COUNT
-    }
-  }
-}
-EOF
+          # Create basic vulnerability report using jq to avoid heredoc indentation issues
+          jq -n \
+            --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --arg scan_type "$TOOL" \
+            --argjson total_files_scanned $(echo "${{ steps.changed-files.outputs.files }}" | wc -w) \
+            --argjson total_vulnerabilities $TOTAL_VULNS \
+            --argjson critical $CRITICAL_VULNS \
+            --argjson high $HIGH_VULNS \
+            --argjson medium $MEDIUM_VULNS \
+            --argjson low $LOW_VULNS \
+            --argjson cpp $CPPCHECK_COUNT \
+            --argjson codeql $CODEQL_COUNT \
+            '{
+              metadata: {
+                generated_at: $generated_at,
+                scan_type: $scan_type,
+                total_files_scanned: $total_files_scanned
+              },
+              summary: {
+                total_vulnerabilities: $total_vulnerabilities,
+                severity_breakdown: {
+                  critical: $critical,
+                  high: $high,
+                  medium: $medium,
+                  low: $low
+                },
+                tool_breakdown: {
+                  cppcheck: $cpp,
+                  codeql: $codeql
+                }
+              }
+            }' > "$VULN_REPORT"
           
           echo "Vulnerability analysis complete!"
           echo "Reports generated in artifacts/ directory"
@@ -258,7 +267,7 @@ EOF
           CRITICAL_FILE="artifacts/critical-vulnerabilities-${TIMESTAMP}.json"
           
           # Create Python script to extract detailed vulnerability information
-          cat > extract_critical_vulns.py << 'PYTHON_EOF'
+          cat > extract_critical_vulns.py <<- 'PYTHON_EOF'
 import json
 import xml.etree.ElementTree as ET
 import sys
@@ -499,7 +508,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-PYTHON_EOF
+	PYTHON_EOF
           
           # Run the Python script to extract detailed vulnerabilities
           CPPCHECK_XML="none"
