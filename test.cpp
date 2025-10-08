@@ -1,5 +1,4 @@
 /*
- * Comprehensive Vulnerability Test File
  * 
  * This file contains vulnerabilities matching all CVE patterns in the knowledge base:
  * - CVE-2020-1472: Buffer overflow (strcpy, strcat, sprintf, gets)
