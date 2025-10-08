@@ -61,7 +61,7 @@ jobs:
   vulnerability-scan:
     name: Comprehensive Vulnerability Scanning
     runs-on: ubuntu-latest
-    needs: codeql  # Wait for CodeQL job to complete
+    needs: codeql-scan  # Wait for CodeQL job to complete
     env:
       SCAN_TOOL: ${{ inputs.scan_tool || vars.SCAN_TOOL || 'both' }}
     
