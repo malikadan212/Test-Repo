@@ -73,17 +73,28 @@ jobs:
 
       - name: Setup scanning tools
         run: |
-          echo "🔧 Setting up vulnerability scanning tools..."
+          echo "Setting up vulnerability scanning tools..."
           # Install only Cppcheck (CodeQL is handled by Job 1)
           sudo apt-get update
           sudo apt-get install -y cppcheck python3 python3-pip jq
 
-      - name: Download CodeQL results
+      - name: Download CodeQL SARIF results
         uses: actions/download-artifact@v4
         with:
-          name: CodeQL results
+          pattern: "*sarif*"  # Try to find SARIF artifacts
           path: codeql-results/
+          merge-multiple: true
         continue-on-error: true  # Don't fail if CodeQL artifacts aren't available
+        
+      - name: Debug - List available artifacts and files
+        run: |
+          echo "=== Available artifacts in workflow ==="
+          # This will help us understand what artifacts GitHub CodeQL creates
+          echo "Contents of codeql-results directory:"
+          ls -la codeql-results/ || echo "No codeql-results directory found"
+          
+          echo "=== Looking for SARIF files in workspace ==="
+          find . -name "*.sarif" -type f 2>/dev/null || echo "No SARIF files found in workspace"
 
       - name: Get changed C/C++ files
         id: changed-files
@@ -133,7 +144,7 @@ jobs:
       - name: Run comprehensive static analysis
         if: steps.changed-files.outputs.has_changes == 'true'
         run: |
-          echo "🔍 Running comprehensive vulnerability analysis..."
+          echo "Running comprehensive vulnerability analysis..."
           
           # Create artifacts directory
           mkdir -p artifacts
@@ -148,7 +159,7 @@ jobs:
           
           # Run Cppcheck analysis if selected
           if [[ "$TOOL" == "cppcheck" || "$TOOL" == "both" ]]; then
-            echo "🔍 Running Cppcheck analysis..."
+            echo "Running Cppcheck analysis..."
             CPPCHECK_REPORT="artifacts/cppcheck-report-${TIMESTAMP}.xml"
             
             # Create file list for analysis
@@ -168,7 +179,7 @@ jobs:
           # This job runs Cppcheck and consolidates both tool results
           
           # Process results (simplified without full pipeline)
-          echo "📊 Processing vulnerability reports..."
+          echo "Processing vulnerability reports..."
           
           # Create a basic vulnerability summary
           VULN_REPORT="artifacts/vulnerability-report-${TIMESTAMP}.json"
@@ -194,7 +205,7 @@ jobs:
           # Parse CodeQL results from downloaded artifacts
           CODEQL_COUNT=0
           if [ -d "codeql-results" ]; then
-            echo "📥 Processing CodeQL results from previous job..."
+            echo "Processing CodeQL results from previous job..."
             # Look for SARIF files in CodeQL results
             CODEQL_SARIF=$(find codeql-results -name "*.sarif" | head -1)
             if [ -f "$CODEQL_SARIF" ]; then
@@ -205,6 +216,9 @@ jobs:
               HIGH_VULNS=$((HIGH_VULNS + CODEQL_COUNT / 2))
               MEDIUM_VULNS=$((MEDIUM_VULNS + CODEQL_COUNT / 4))
               echo "CodeQL findings: $CODEQL_COUNT vulnerabilities"
+              
+              # Copy SARIF file to artifacts for detailed analysis
+              cp "$CODEQL_SARIF" "artifacts/codeql-detailed-${TIMESTAMP}.sarif"
             else
               echo "No CodeQL SARIF files found in artifacts"
             fi
@@ -213,69 +227,295 @@ jobs:
           fi
           
           # Create basic vulnerability report
-          cat > "$VULN_REPORT" << EOF
-          {
-            "metadata": {
-              "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-              "scan_type": "$TOOL",
-              "total_files_scanned": $(echo "${{ steps.changed-files.outputs.files }}" | wc -w)
-            },
-            "summary": {
-              "total_vulnerabilities": $TOTAL_VULNS,
-              "severity_breakdown": {
-                "critical": $CRITICAL_VULNS,
-                "high": $HIGH_VULNS,
-                "medium": $MEDIUM_VULNS,
-                "low": $LOW_VULNS
-              },
-              "tool_breakdown": {
-                "cppcheck": $CPPCHECK_COUNT,
-                "codeql": $CODEQL_COUNT
-              }
-            }
-          }
-          EOF
+          cat > "$VULN_REPORT" << 'EOF'
+{
+  "metadata": {
+    "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "scan_type": "$TOOL",
+    "total_files_scanned": $(echo "${{ steps.changed-files.outputs.files }}" | wc -w)
+  },
+  "summary": {
+    "total_vulnerabilities": $TOTAL_VULNS,
+    "severity_breakdown": {
+      "critical": $CRITICAL_VULNS,
+      "high": $HIGH_VULNS,
+      "medium": $MEDIUM_VULNS,
+      "low": $LOW_VULNS
+    },
+    "tool_breakdown": {
+      "cppcheck": $CPPCHECK_COUNT,
+      "codeql": $CODEQL_COUNT
+    }
+  }
+}
+EOF
           
           echo "Vulnerability analysis complete!"
           echo "Reports generated in artifacts/ directory"
           
-          # Generate critical vulnerabilities file for Module 3 if critical issues found
-          if [ "$CRITICAL_VULNS" -gt 0 ]; then
-            echo "🚨 Generating critical vulnerabilities file for Module 3..."
-            CRITICAL_FILE="artifacts/critical-vulnerabilities-${TIMESTAMP}.json"
+          # Generate detailed critical vulnerabilities file for Module 3
+          echo "Generating detailed critical vulnerabilities file for Module 3..."
+          CRITICAL_FILE="artifacts/critical-vulnerabilities-${TIMESTAMP}.json"
+          
+          # Create Python script to extract detailed vulnerability information
+          cat > extract_critical_vulns.py << 'PYTHON_EOF'
+import json
+import xml.etree.ElementTree as ET
+import sys
+from datetime import datetime
+
+def parse_cppcheck_xml(xml_file):
+    """Extract critical vulnerabilities from Cppcheck XML"""
+    critical_vulns = []
+    if not xml_file:
+        return critical_vulns
+        
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        
+        for error in root.findall('.//error'):
+            severity = error.get('severity', 'unknown')
+            error_id = error.get('id', 'unknown')
+            msg = error.get('msg', 'No message')
             
-            cat > "$CRITICAL_FILE" << EOF
-            {
-              "metadata": {
-                "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-                "total_critical": $CRITICAL_VULNS,
-                "purpose": "Input for Module 3 - Dynamic Analysis",
-                "source_report": "vulnerability-report-${TIMESTAMP}.json",
-                "module": "Critical Vulnerability Extraction",
-                "version": "1.0"
-              },
-              "critical_vulnerabilities": [],
-              "dynamic_analysis_targets": {
-                "files_to_analyze": $(echo "${{ steps.changed-files.outputs.files }}" | jq -R 'split(" ")'),
-                "test_cases_needed": [
-                  "Boundary testing for critical vulnerabilities",
-                  "Fuzzing tests for buffer overflows",
-                  "Memory safety validation"
-                ],
-                "analysis_suggestions": [
-                  "Use fuzzing tools (AFL, libFuzzer) to test buffer boundaries",
-                  "Use AddressSanitizer (ASan) for memory safety issues",
-                  "Use Valgrind for memory leak detection",
-                  "Perform runtime validation of critical code paths"
-                ]
-              }
-            }
-            EOF
+            # Classify as critical based on error type
+            is_critical = any(pattern in error_id.lower() for pattern in [
+                'buffer', 'overflow', 'bounds', 'null', 'pointer', 
+                'useafterfree', 'doublefree', 'memleak'
+            ])
             
-            echo "Critical vulnerabilities file generated: $CRITICAL_FILE"
-          else
-            echo "No critical vulnerabilities found - Module 3 file not needed"
+            if is_critical or severity in ['error', 'warning']:
+                location = error.find('location')
+                if location is not None:
+                    vuln = {
+                        "id": f"cppcheck-{error_id}-{location.get('line', '0')}",
+                        "tool": "cppcheck",
+                        "type": error_id,
+                        "severity": "critical" if is_critical else "high",
+                        "message": msg,
+                        "file_path": location.get('file', 'unknown'),
+                        "line": int(location.get('line', 0)),
+                        "column": int(location.get('column', 0)),
+                        "cwe_id": f"CWE-{get_cwe_for_error(error_id)}",
+                        "dynamic_analysis_priority": "high" if is_critical else "medium"
+                    }
+                    critical_vulns.append(vuln)
+    except Exception as e:
+        print(f"Error parsing Cppcheck XML: {e}")
+    
+    return critical_vulns
+
+def parse_codeql_sarif(sarif_file):
+    """Extract critical vulnerabilities from CodeQL SARIF"""
+    critical_vulns = []
+    if not sarif_file:
+        return critical_vulns
+        
+    try:
+        with open(sarif_file, 'r') as f:
+            sarif_data = json.load(f)
+        
+        for run in sarif_data.get('runs', []):
+            for result in run.get('results', []):
+                rule_id = result.get('ruleId', 'unknown')
+                message = result.get('message', {}).get('text', 'No message')
+                level = result.get('level', 'note')
+                
+                # Extract location information
+                locations = result.get('locations', [])
+                if locations:
+                    location = locations[0]
+                    physical_location = location.get('physicalLocation', {})
+                    artifact_location = physical_location.get('artifactLocation', {})
+                    region = physical_location.get('region', {})
+                    
+                    # Classify severity based on CodeQL rule
+                    is_critical = any(pattern in rule_id.lower() for pattern in [
+                        'buffer', 'overflow', 'injection', 'memory', 'pointer',
+                        'use-after-free', 'double-free', 'null-dereference'
+                    ])
+                    
+                    severity = "critical" if (is_critical or level == "error") else "high" if level == "warning" else "medium"
+                    
+                    if severity in ["critical", "high"]:
+                        vuln = {
+                            "id": f"codeql-{rule_id}-{region.get('startLine', '0')}",
+                            "tool": "codeql",
+                            "type": rule_id,
+                            "severity": severity,
+                            "message": message,
+                            "file_path": artifact_location.get('uri', 'unknown'),
+                            "line": region.get('startLine', 0),
+                            "column": region.get('startColumn', 0),
+                            "end_line": region.get('endLine', 0),
+                            "end_column": region.get('endColumn', 0),
+                            "cwe_id": extract_cwe_from_message(message),
+                            "dynamic_analysis_priority": "high" if is_critical else "medium",
+                            "code_snippet": region.get('snippet', {}).get('text', '')
+                        }
+                        critical_vulns.append(vuln)
+    except Exception as e:
+        print(f"Error parsing CodeQL SARIF: {e}")
+    
+    return critical_vulns
+
+def get_cwe_for_error(error_id):
+    """Map Cppcheck error IDs to CWE numbers"""
+    cwe_mapping = {
+        'bufferAccessOutOfBounds': '120',
+        'arrayIndexOutOfBounds': '125',
+        'nullPointer': '476',
+        'useAfterFree': '416',
+        'doubleFree': '415',
+        'memoryLeak': '401',
+        'uninitvar': '457',
+        'resourceLeak': '404'
+    }
+    return cwe_mapping.get(error_id, '119')  # Default to CWE-119
+
+def extract_cwe_from_message(message):
+    """Extract CWE ID from CodeQL message if present"""
+    import re
+    cwe_match = re.search(r'CWE-(\d+)', message)
+    return f"CWE-{cwe_match.group(1)}" if cwe_match else "CWE-119"
+
+def generate_dynamic_analysis_targets(critical_vulns, changed_files):
+    """Generate specific targets for dynamic analysis"""
+    files_to_analyze = list(set([v['file_path'] for v in critical_vulns if v['file_path'] != 'unknown']))
+    
+    # Add changed files that might contain vulnerabilities
+    for file in changed_files:
+        if file.endswith(('.cpp', '.c', '.h', '.hpp')) and file not in files_to_analyze:
+            files_to_analyze.append(file)
+    
+    # Generate specific test cases based on vulnerability types
+    test_cases = []
+    analysis_suggestions = []
+    
+    vuln_types = set([v['type'] for v in critical_vulns])
+    
+    if any('buffer' in vtype.lower() or 'overflow' in vtype.lower() for vtype in vuln_types):
+        test_cases.extend([
+            "Boundary testing with oversized inputs",
+            "Fuzzing with random buffer sizes",
+            "Edge case testing with maximum buffer limits"
+        ])
+        analysis_suggestions.extend([
+            "Use AFL or libFuzzer for buffer overflow testing",
+            "Test with AddressSanitizer (ASan) enabled",
+            "Validate all buffer boundary checks"
+        ])
+    
+    if any('pointer' in vtype.lower() or 'null' in vtype.lower() for vtype in vuln_types):
+        test_cases.extend([
+            "Null pointer injection testing",
+            "Invalid pointer dereference scenarios",
+            "Memory access pattern validation"
+        ])
+        analysis_suggestions.extend([
+            "Use Valgrind for memory error detection",
+            "Test with UndefinedBehaviorSanitizer (UBSan)",
+            "Validate all pointer checks before use"
+        ])
+    
+    if any('memory' in vtype.lower() or 'leak' in vtype.lower() for vtype in vuln_types):
+        test_cases.extend([
+            "Memory allocation/deallocation testing",
+            "Long-running memory usage analysis",
+            "Resource cleanup validation"
+        ])
+        analysis_suggestions.extend([
+            "Use Valgrind for memory leak detection",
+            "Monitor memory usage during extended testing",
+            "Validate all resource cleanup paths"
+        ])
+    
+    return {
+        "files_to_analyze": files_to_analyze,
+        "test_cases_needed": test_cases,
+        "analysis_suggestions": analysis_suggestions
+    }
+
+def main():
+    if len(sys.argv) < 4:
+        print("Usage: python extract_critical_vulns.py <cppcheck_xml> <codeql_sarif> <changed_files> <output_file>")
+        sys.exit(1)
+    
+    cppcheck_xml = sys.argv[1] if sys.argv[1] != "none" else None
+    codeql_sarif = sys.argv[2] if sys.argv[2] != "none" else None
+    changed_files = sys.argv[3].split() if sys.argv[3] else []
+    output_file = sys.argv[4]
+    
+    # Extract vulnerabilities from both tools
+    critical_vulns = []
+    critical_vulns.extend(parse_cppcheck_xml(cppcheck_xml))
+    critical_vulns.extend(parse_codeql_sarif(codeql_sarif))
+    
+    # Generate dynamic analysis targets
+    dynamic_targets = generate_dynamic_analysis_targets(critical_vulns, changed_files)
+    
+    # Create the final critical vulnerabilities file
+    result = {
+        "metadata": {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "total_critical": len([v for v in critical_vulns if v['severity'] == 'critical']),
+            "total_high": len([v for v in critical_vulns if v['severity'] == 'high']),
+            "total_vulnerabilities": len(critical_vulns),
+            "purpose": "Input for Module 3 - Dynamic Analysis",
+            "module": "Critical Vulnerability Extraction",
+            "version": "2.0",
+            "tools_used": list(set([v['tool'] for v in critical_vulns]))
+        },
+        "critical_vulnerabilities": critical_vulns,
+        "dynamic_analysis_targets": dynamic_targets,
+        "vulnerability_summary": {
+            "by_severity": {
+                "critical": len([v for v in critical_vulns if v['severity'] == 'critical']),
+                "high": len([v for v in critical_vulns if v['severity'] == 'high']),
+                "medium": len([v for v in critical_vulns if v['severity'] == 'medium'])
+            },
+            "by_tool": {
+                "cppcheck": len([v for v in critical_vulns if v['tool'] == 'cppcheck']),
+                "codeql": len([v for v in critical_vulns if v['tool'] == 'codeql'])
+            },
+            "by_type": {}
+        }
+    }
+    
+    # Count by vulnerability type
+    for vuln in critical_vulns:
+        vtype = vuln['type']
+        result["vulnerability_summary"]["by_type"][vtype] = result["vulnerability_summary"]["by_type"].get(vtype, 0) + 1
+    
+    # Write the result
+    with open(output_file, 'w') as f:
+        json.dump(result, f, indent=2)
+    
+    print(f"Generated detailed critical vulnerabilities file: {output_file}")
+    print(f"Total vulnerabilities: {len(critical_vulns)}")
+    print(f"Critical: {result['metadata']['total_critical']}")
+    print(f"High: {result['metadata']['total_high']}")
+
+if __name__ == "__main__":
+    main()
+PYTHON_EOF
+          
+          # Run the Python script to extract detailed vulnerabilities
+          CPPCHECK_XML="none"
+          CODEQL_SARIF="none"
+          
+          if [ -f "artifacts/cppcheck-report-${TIMESTAMP}.xml" ]; then
+            CPPCHECK_XML="artifacts/cppcheck-report-${TIMESTAMP}.xml"
           fi
+          
+          if [ -f "artifacts/codeql-detailed-${TIMESTAMP}.sarif" ]; then
+            CODEQL_SARIF="artifacts/codeql-detailed-${TIMESTAMP}.sarif"
+          fi
+          
+          python3 extract_critical_vulns.py "$CPPCHECK_XML" "$CODEQL_SARIF" "${{ steps.changed-files.outputs.files }}" "$CRITICAL_FILE"
+          
+          echo "Detailed critical vulnerabilities file generated for Module 3!"
 
       - name: Analyze scan results
         if: steps.changed-files.outputs.has_changes == 'true'
@@ -313,7 +553,7 @@ jobs:
       - name: Create vulnerability summary
         if: steps.changed-files.outputs.has_changes == 'true'
         run: |
-          echo "## 🔍 Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "## Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Check vulnerability report
@@ -326,7 +566,7 @@ jobs:
               MEDIUM_VULNS=$(jq -r '.summary.severity_breakdown.medium // 0' "$LATEST_REPORT")
               LOW_VULNS=$(jq -r '.summary.severity_breakdown.low // 0' "$LATEST_REPORT")
               
-              echo "### 📊 Vulnerability Detection Summary:" >> $GITHUB_STEP_SUMMARY
+              echo "### Vulnerability Detection Summary:" >> $GITHUB_STEP_SUMMARY
               echo "- **Total vulnerabilities detected**: $TOTAL_VULNS" >> $GITHUB_STEP_SUMMARY
               echo "- **Critical**: $CRITICAL_VULNS" >> $GITHUB_STEP_SUMMARY
               echo "- **High**: $HIGH_VULNS" >> $GITHUB_STEP_SUMMARY
@@ -340,20 +580,20 @@ jobs:
                 CRITICAL_COUNT=$(jq -r '.metadata.total_critical // 0' "$CRITICAL_FILE")
                 FILES_COUNT=$(jq -r '.dynamic_analysis_targets.files_to_analyze | length' "$CRITICAL_FILE")
                 
-                echo "### 🚨 Critical Vulnerabilities for Module 3:" >> $GITHUB_STEP_SUMMARY
+                echo "### Critical Vulnerabilities for Module 3:" >> $GITHUB_STEP_SUMMARY
                 echo "- **Critical vulnerabilities file**: \`$(basename "$CRITICAL_FILE")\`" >> $GITHUB_STEP_SUMMARY
                 echo "- **Critical issues found**: $CRITICAL_COUNT" >> $GITHUB_STEP_SUMMARY
                 echo "- **Files requiring dynamic analysis**: $FILES_COUNT" >> $GITHUB_STEP_SUMMARY
                 echo "- **Status**: Ready for Module 3 (Dynamic Analysis)" >> $GITHUB_STEP_SUMMARY
                 echo "" >> $GITHUB_STEP_SUMMARY
               elif [ "$CRITICAL_VULNS" -gt 0 ]; then
-                echo "### ⚠️ Critical Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
+                echo "### Critical Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
                 echo "- **$CRITICAL_VULNS critical issues found**" >> $GITHUB_STEP_SUMMARY
                 echo "" >> $GITHUB_STEP_SUMMARY
               fi
               
               if [ "$TOTAL_VULNS" -gt 0 ]; then
-                echo "### 🔍 Vulnerability Types Detected:" >> $GITHUB_STEP_SUMMARY
+                echo "### Vulnerability Types Detected:" >> $GITHUB_STEP_SUMMARY
                 jq -r '.summary.type_breakdown | to_entries[] | select(.value > 0) | "- **\(.key | gsub("_"; " ") | ascii_upcase)**: \(.value)"' "$LATEST_REPORT" >> $GITHUB_STEP_SUMMARY
                 echo "" >> $GITHUB_STEP_SUMMARY
                 jq -r '.summary.tool_breakdown | to_entries[] | "- **\(.key)**: \(.value) issues"' "$LATEST_REPORT" >> $GITHUB_STEP_SUMMARY
@@ -468,31 +708,31 @@ jobs:
               HIGH=$(jq -r '.summary.severity_breakdown.high // 0' "$LATEST_REPORT")
               TOTAL=$(jq -r '.summary.total_vulnerabilities // 0' "$LATEST_REPORT")
               
-              echo "🔍 Security Gate Results:"
+              echo "Security Gate Results:"
               echo "  Critical: $CRITICAL"
               echo "  High: $HIGH"
               echo "  Total: $TOTAL"
               
               # Fail build on critical vulnerabilities
               if [ "$CRITICAL" -gt 0 ]; then
-                echo "❌ Build FAILED: $CRITICAL critical vulnerabilities detected"
+                echo "Build FAILED: $CRITICAL critical vulnerabilities detected"
                 echo "Critical vulnerabilities must be fixed before merging"
                 exit 1
               fi
               
               # Warn on high vulnerabilities (but don't fail)
               if [ "$HIGH" -gt 3 ]; then
-                echo "⚠️  WARNING: $HIGH high severity vulnerabilities found (threshold: 3)"
+                echo "WARNING: $HIGH high severity vulnerabilities found (threshold: 3)"
                 echo "Consider fixing these before merging"
                 echo "You can override this by reviewing the security implications"
               fi
               
               if [ "$TOTAL" -eq 0 ]; then
-                echo "✅ No vulnerabilities detected - security gate passed"
+                echo "No vulnerabilities detected - security gate passed"
               else
-                echo "✅ Security gate passed (no critical vulnerabilities)"
+                echo "Security gate passed (no critical vulnerabilities)"
               fi
             fi
           else
-            echo "✅ No vulnerability reports found - assuming clean scan"
+            echo "No vulnerability reports found - assuming clean scan"
           fi
