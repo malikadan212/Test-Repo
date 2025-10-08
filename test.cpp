@@ -1,6 +1,5 @@
 /*
  * 
- * Testing vulnerability scanning
  * This file contains vulnerabilities matching all CVE patterns in the knowledge base:
  * - CVE-2020-1472: Buffer overflow (strcpy, strcat, sprintf, gets)
  * - CVE-2019-11043: Stack-based buffer overflow
