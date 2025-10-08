@@ -1,5 +1,4 @@
 /*
- * Comprehensive Vulnerability Test File
  * 
  * This file contains vulnerabilities matching all CVE patterns in the knowledge base:
  * - CVE-2020-1472: Buffer overflow (strcpy, strcat, sprintf, gets)
@@ -10,7 +9,6 @@
  * - CVE-2015-7547: Integer overflow
  * - CVE-2014-0160: Format string vulnerability
  * - CVE-2013-2028: Uninitialized variable
- * - CVE-2012-2459: Resource leak (file handles)
  *
  * WARNING: This code is intentionally vulnerable for testing purposes.
  * DO NOT use in production!
