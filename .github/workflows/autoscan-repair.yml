@@ -61,6 +61,7 @@ jobs:
   vulnerability-scan:
     name: Comprehensive Vulnerability Scanning
     runs-on: ubuntu-latest
+    needs: codeql  # Wait for CodeQL job to complete
     env:
       SCAN_TOOL: ${{ inputs.scan_tool || vars.SCAN_TOOL || 'both' }}
     
@@ -73,18 +74,16 @@ jobs:
       - name: Setup scanning tools
         run: |
           echo "🔧 Setting up vulnerability scanning tools..."
-          # Install tools directly on runner instead of using container
+          # Install only Cppcheck (CodeQL is handled by Job 1)
           sudo apt-get update
           sudo apt-get install -y cppcheck python3 python3-pip jq
-          
-          # Install CodeQL
-          echo "📥 Installing CodeQL..."
-          curl -L https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-linux64.zip -o codeql.zip
-          unzip codeql.zip -d $HOME/
-          echo "$HOME/codeql" >> $GITHUB_PATH
-          
-          # Clone CodeQL queries
-          git clone --depth 1 https://github.com/github/codeql.git $HOME/codeql-repo
+
+      - name: Download CodeQL results
+        uses: actions/download-artifact@v4
+        with:
+          name: CodeQL results
+          path: codeql-results/
+        continue-on-error: true  # Don't fail if CodeQL artifacts aren't available
 
       - name: Get changed C/C++ files
         id: changed-files
@@ -142,6 +141,7 @@ jobs:
           # Get tool selection
           TOOL="${{ inputs.scan_tool || vars.SCAN_TOOL || 'both' }}"
           echo "Using analysis tool: ${TOOL}"
+          echo "Note: CodeQL runs in Job 1, Cppcheck runs here, results consolidated"
           
           # Get current timestamp for report naming
           TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
@@ -164,27 +164,8 @@ jobs:
             echo "Cppcheck analysis complete: $CPPCHECK_REPORT"
           fi
           
-          # Run CodeQL analysis if selected
-          if [[ "$TOOL" == "codeql" || "$TOOL" == "both" ]]; then
-            echo "🔍 Running CodeQL analysis..."
-            CODEQL_DB="artifacts/codeql-database"
-            CODEQL_REPORT="artifacts/codeql-report-${TIMESTAMP}.sarif"
-            
-            # Create CodeQL database
-            codeql database create "$CODEQL_DB" \
-              --language=cpp \
-              --source-root="${{ github.workspace }}" \
-              --overwrite || true
-            
-            # Run CodeQL analysis
-            codeql database analyze "$CODEQL_DB" \
-              --search-path="$HOME/codeql-repo" \
-              --format=sarif-latest \
-              --output="$CODEQL_REPORT" \
-              "$HOME/codeql-repo/cpp/ql/src/codeql-suites/cpp-security-and-quality.qls" || true
-            
-            echo "CodeQL analysis complete: $CODEQL_REPORT"
-          fi
+          # Note: CodeQL analysis is handled by Job 1, results integrated here
+          # This job runs Cppcheck and consolidates both tool results
           
           # Process results (simplified without full pipeline)
           echo "📊 Processing vulnerability reports..."
@@ -210,14 +191,25 @@ jobs:
             LOW_VULNS=$((LOW_VULNS + CPPCHECK_COUNT / 4))
           fi
           
-          # Parse CodeQL results if exists
-          if [ -f "artifacts/codeql-report-${TIMESTAMP}.sarif" ]; then
-            CODEQL_COUNT=$(jq '.runs[0].results | length' "artifacts/codeql-report-${TIMESTAMP}.sarif" 2>/dev/null || echo "0")
-            TOTAL_VULNS=$((TOTAL_VULNS + CODEQL_COUNT))
-            # Estimate severity distribution (simplified)
-            CRITICAL_VULNS=$((CRITICAL_VULNS + CODEQL_COUNT / 3))
-            HIGH_VULNS=$((HIGH_VULNS + CODEQL_COUNT / 2))
-            MEDIUM_VULNS=$((MEDIUM_VULNS + CODEQL_COUNT / 4))
+          # Parse CodeQL results from downloaded artifacts
+          CODEQL_COUNT=0
+          if [ -d "codeql-results" ]; then
+            echo "📥 Processing CodeQL results from previous job..."
+            # Look for SARIF files in CodeQL results
+            CODEQL_SARIF=$(find codeql-results -name "*.sarif" | head -1)
+            if [ -f "$CODEQL_SARIF" ]; then
+              CODEQL_COUNT=$(jq '.runs[0].results | length' "$CODEQL_SARIF" 2>/dev/null || echo "0")
+              TOTAL_VULNS=$((TOTAL_VULNS + CODEQL_COUNT))
+              # Estimate severity distribution for CodeQL (simplified)
+              CRITICAL_VULNS=$((CRITICAL_VULNS + CODEQL_COUNT / 3))
+              HIGH_VULNS=$((HIGH_VULNS + CODEQL_COUNT / 2))
+              MEDIUM_VULNS=$((MEDIUM_VULNS + CODEQL_COUNT / 4))
+              echo "CodeQL findings: $CODEQL_COUNT vulnerabilities"
+            else
+              echo "No CodeQL SARIF files found in artifacts"
+            fi
+          else
+            echo "No CodeQL results directory found"
           fi
           
           # Create basic vulnerability report
@@ -246,6 +238,44 @@ jobs:
           
           echo "Vulnerability analysis complete!"
           echo "Reports generated in artifacts/ directory"
+          
+          # Generate critical vulnerabilities file for Module 3 if critical issues found
+          if [ "$CRITICAL_VULNS" -gt 0 ]; then
+            echo "🚨 Generating critical vulnerabilities file for Module 3..."
+            CRITICAL_FILE="artifacts/critical-vulnerabilities-${TIMESTAMP}.json"
+            
+            cat > "$CRITICAL_FILE" << EOF
+            {
+              "metadata": {
+                "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+                "total_critical": $CRITICAL_VULNS,
+                "purpose": "Input for Module 3 - Dynamic Analysis",
+                "source_report": "vulnerability-report-${TIMESTAMP}.json",
+                "module": "Critical Vulnerability Extraction",
+                "version": "1.0"
+              },
+              "critical_vulnerabilities": [],
+              "dynamic_analysis_targets": {
+                "files_to_analyze": $(echo "${{ steps.changed-files.outputs.files }}" | jq -R 'split(" ")'),
+                "test_cases_needed": [
+                  "Boundary testing for critical vulnerabilities",
+                  "Fuzzing tests for buffer overflows",
+                  "Memory safety validation"
+                ],
+                "analysis_suggestions": [
+                  "Use fuzzing tools (AFL, libFuzzer) to test buffer boundaries",
+                  "Use AddressSanitizer (ASan) for memory safety issues",
+                  "Use Valgrind for memory leak detection",
+                  "Perform runtime validation of critical code paths"
+                ]
+              }
+            }
+            EOF
+            
+            echo "Critical vulnerabilities file generated: $CRITICAL_FILE"
+          else
+            echo "No critical vulnerabilities found - Module 3 file not needed"
+          fi
 
       - name: Analyze scan results
         if: steps.changed-files.outputs.has_changes == 'true'
