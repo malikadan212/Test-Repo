@@ -41,7 +41,7 @@ void test_strcpy_overflow() {
 
 void test_strcat_overflow() {
     char buffer[20] = "Hello ";
-    char append[50] = "this is a very long string that will overflow the buffer";
+    char append[60] = "this is a very long string that will overflow the buffer";
     
     // VULNERABILITY: strcat without bounds checking
     strcat(buffer, append);  // Buffer overflow!
